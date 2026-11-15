@@ -3,6 +3,7 @@ name = "jamra-conditions"
 version = "0.1.0"
 description = "Daily fire probability per H3 cell from weather, with replays and analog cases (NASA Space Apps 2026)"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
     "numpy>=2.4.6",

@@ -111,3 +111,6 @@ uv run pytest -q
 - التوقّع الحي يحتاج اتصالاً بـ Open-Meteo.
 
 </div>
+
+## License
+MIT, see [LICENSE](LICENSE). Data keep their own terms: NASA FIRMS (open), Open-Meteo (CC BY 4.0), FPA FOD-Attributes (CC BY 4.0).
