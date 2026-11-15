@@ -30,7 +30,9 @@ import numpy as np
 import pandas as pd
 from h3.api import basic_int as h3
 
-FEATS = ["tmax", "rhmin", "wind", "rain", "rain20", "dry", "ffdi", "msin", "mcos", "clim"]
+FEATS = ["tmax", "rhmin", "wind", "rain", "rain20", "dry", "ffdi", "msin", "mcos", "clim", "prev1", "nb_prev1"]
+# prev1 / nb_prev1: a vegetation fire in this cell / a neighbouring cell the day before. Measured year-out
+# (JAMRA experiments/conditions_v2.py): top-10% capture 74.2% → 75.6%, AUC 0.933 → 0.937, better in every year 2021–2025.
 RES = 4
 AREA = (34.7, 29.0, 39.5, 33.6)   # lon0, lat0, lon1, lat1: الأردن وجواره
 START, END = "2021-11-01", "2025-12-31"
@@ -113,6 +115,44 @@ def fire_days(points_glob, start=START, bbox=AREA):
         group by 1, 2""").df()
 
 
+def static_spots(points_glob, bbox=AREA):
+    """Where the archive saw only non-vegetation heat (FIRMS type 2 static land sources, 3 offshore): gas flares,
+    factories. Live detections lack the type, so near these spots they must not count as yesterday's fire."""
+    import duckdb
+    return {(round(a, 2), round(b, 2)) for a, b in duckdb.sql(f"""
+        select distinct round(lat, 2), round(lon, 2) from read_parquet('{points_glob}', hive_partitioning = 1)
+        where type in (2, 3) and lon between {bbox[0] - 0.5} and {bbox[2] + 0.5}
+              and lat between {bbox[1] - 0.5} and {bbox[3] + 0.5}""").fetchall()}
+
+
+def burned_regions(dets, static=frozenset()):
+    """Cells with a live vegetation-like detection: polar sensors only (the model was trained on MODIS/VIIRS),
+    nothing within ~1 km (0.01°) of a known static heat source."""
+    out = set()
+    for d in dets:
+        if "Meteosat" in d.get("sensor", ""):
+            continue
+        a, b = round(d["lat"], 2), round(d["lon"], 2)
+        if any((round(a + i / 100, 2), round(b + j / 100, 2)) in static for i in (-1, 0, 1) for j in (-1, 0, 1)):
+            continue
+        out.add(region(d["lat"], d["lon"]))
+    return out
+
+
+def add_persistence(t, burned=None):
+    """prev1 / nb_prev1 from the table's own fire column (history), or from `burned` cells (live day)."""
+    if burned is not None:
+        t["prev1"] = t["region"].map(lambda r: int(int(r) in burned))
+        t["nb_prev1"] = t["region"].map(lambda r: int(any(n in burned for n in h3.grid_disk(int(r), 1) if n != int(r))))
+        return t
+    fired = set(zip(t.loc[t["fire"] == 1, "region"].astype(int), t.loc[t["fire"] == 1, "date"]))
+    yday = (pd.to_datetime(t["date"]) - pd.Timedelta(days=1)).dt.date
+    ring = {r: [n for n in h3.grid_disk(int(r), 1) if n != int(r)] for r in t["region"].unique()}
+    t["prev1"] = [int((int(r), d) in fired) for r, d in zip(t["region"], yday)]
+    t["nb_prev1"] = [int(any((n, d) in fired for n in ring[r])) for r, d in zip(t["region"], yday)]
+    return t
+
+
 def add_weather_features(w):
     """weather_daily (أو توقّع Open-Meteo بنفس الأعمدة) → ميزات الظروف."""
     w = w.rename(columns={"temperature_2m_max": "tmax", "relative_humidity_2m_min": "rhmin",
@@ -122,6 +162,7 @@ def add_weather_features(w):
     w[["tmax", "rhmin", "wind", "rain"]] = w[["tmax", "rhmin", "wind", "rain"]].astype(float)
     w["rain"] = w["rain"].fillna(0.0)
     w["rain20"] = w.groupby("region")["rain"].transform(lambda s: s.rolling(20, min_periods=1).sum())
+    w["rain5"] = w.groupby("region")["rain"].transform(lambda s: s.rolling(5, min_periods=1).mean())   # the cause model's input
     wet = (w["rain"] > 1.0).astype(int).groupby(w["region"]).cumsum()
     w["dry"] = w.groupby([w["region"], wet]).cumcount().clip(upper=60)   # أيام من آخر مطر > 1 مم
     w["ffdi"] = ffdi(w["tmax"], w["rhmin"], w["wind"], w["rain20"])
@@ -151,6 +192,7 @@ class Conditions:
         t = w.merge(f, on=["region", "date"], how="left")
         t[["n_viirs", "n_modis"]] = t[["n_viirs", "n_modis"]].fillna(0)
         t["fire"] = ((t["n_viirs"] + t["n_modis"]) > 0).astype(int)
+        t = add_persistence(t)
         t["year"] = pd.to_datetime(t["date"]).dt.year
         t["p_oof"], t["clim_oof"] = np.nan, np.nan
         for y in sorted(t["year"].unique()):
@@ -233,9 +275,11 @@ class Conditions:
         return [c for c in sorted(self.table["region"].unique())
                 if lat0 <= h3.cell_to_latlng(int(c))[0] <= lat1 and lon0 <= h3.cell_to_latlng(int(c))[1] <= lon1]
 
-    def outlook(self, day, bbox=AREA, fetch=None, top=10):
+    def outlook(self, day, bbox=AREA, fetch=None, top=10, burned=None):
         """يوم بالماضي → إعادة من الطقس المحفوظ مع شو صار فعلاً. يوم جاي → توقّع Open-Meteo بالساعة.
-        `cells` لكل الخلايا (للخريطة)، و`regions` أعلى `top` بالتفاصيل والحالات السابقة."""
+        `cells` لكل الخلايا (للخريطة)، و`regions` أعلى `top` بالتفاصيل والحالات السابقة.
+        `burned`: خلايا فيها حريق حي بآخر 24 ساعة (burned_regions)، بتصير «حريق مبارح» لليوم الجاي.
+        shortcut: بعد بكرة كمان بياخد نفس آخر 24 ساعة؛ أدق شي بيكون لليوم وبكرة."""
         regs = self.regions_in(bbox)
         past = self.table[(self.table["date"] == day) & self.table["region"].isin(regs)]
         if not past.empty:
@@ -246,6 +290,7 @@ class Conditions:
             mode = "live"
             if rows is None or rows.empty:
                 return {"date": str(day), "mode": "unavailable", "regions": [], "cells": [], "eval": self.eval}
+            rows = add_persistence(rows, set(burned or ()))
             p = self.predict(rows)
         order = np.argsort(-p)
         cells = [{"region": str(int(rows.at[i, "region"])),
@@ -258,6 +303,7 @@ class Conditions:
             item = {**cells[len(out)], "ffdi": round(float(row["ffdi"]), 1),
                     "tmax": round(float(row["tmax"]), 1), "rhmin": int(row["rhmin"]),
                     "wind": round(float(row["wind"]), 1), "rain20": round(float(row["rain20"]), 1),
+                    "rain": round(float(row["rain"]), 1), "rain5": round(float(row["rain5"]), 2),
                     "dry": int(row["dry"]), "peak_hours": hourly.get(int(row["region"]), []),
                     "analogs": self.analogs(row)}
             if mode == "replay":

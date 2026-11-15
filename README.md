@@ -9,7 +9,10 @@ For every H3 cell (resolution 4, ~40 km; 118 cells over Jordan and its neighbour
 probability that satellites see a vegetation fire there, from the weather of that day:
 
 - **Features:** max temperature, min humidity, max wind, rain, 20-day rain, days since rain, McArthur FFDI,
-  month (sin/cos) and the cell's historical fire rate for that month.
+  month (sin/cos), the cell's historical fire rate for that month, and **yesterday's fire**: a vegetation fire in
+  this cell (`prev1`) or a neighbouring cell (`nb_prev1`) the day before. For a live day, yesterday's fire comes from the
+  last 24 h of polar-satellite detections (`burned_regions`), skipping known static heat sources (`static_spots`:
+  FIRMS type 2/3 such as gas flares and factories).
 - **Model:** scikit-learn `HistGradientBoostingClassifier`.
 - **Honest scoring:** leave-one-year-out — every day is scored by a model that never saw its year, and the
   climatology feature is also rebuilt without that year.
@@ -22,13 +25,15 @@ A fire-day = any vegetation detection (`type 0`, confidence not low) from MODIS 
 ## Results (2021-11 → 2025, leave-one-year-out)
 | | AUC | share of fire-days in the top 10 % of predictions |
 |---|---|---|
-| model | **0.933** | **74 %** (×7.4 chance) |
+| model | **0.937** | **75.6 %** (×7.6 chance) |
 | climatology alone | 0.933 | 73 % |
 | FFDI alone | 0.38 | — |
 
+Adding yesterday's fire took the model from 74.2 % to 75.6 % (AUC 0.933 → 0.937), and it helped in every held-out year.
+
 Replay of 2024-06-17 (Ajloun/Burqush fire): 3 of Jordan's 4 fires were in the top 8 cells.
 
-**Read this honestly:** climatology alone scores about the same. Most fires in this region are agricultural burning
+**Read this honestly:** climatology alone scores almost the same. Most fires in this region are agricultural burning
 at fixed places and seasons, not hot dry days, so the weather adds little on top of "where and when it usually burns".
 
 ## Install
@@ -76,7 +81,8 @@ Sources: **NASA FIRMS** (MODIS C6.1, VIIRS S-NPP / NOAA-20), **Open-Meteo** arch
 
 ### ماذا يفعل
 لكل خلية H3 (دقة 4، نحو 40 كم؛ 118 خلية على الأردن وجواره) ولكل يوم، يعطي احتمال أن تسجّل الأقمار حريقاً نباتياً فيها،
-من طقس ذلك اليوم: الحرارة، الرطوبة، الريح، المطر، مطر 20 يوماً، أيام بلا مطر، FFDI، الشهر، والمعدّل التاريخي للخلية.
+من طقس ذلك اليوم: الحرارة، الرطوبة، الريح، المطر، مطر 20 يوماً، أيام بلا مطر، FFDI، الشهر، والمعدّل التاريخي للخلية،
+و**حريق مبارح** بالخلية أو جيرانها (بدون مصادر الحرارة الثابتة متل حرق الغاز والمصانع).
 القياس «سنة برّا»: كل يوم يتوقّعه نموذج لم يرَ سنته.
 ليوم ماضٍ يعطي **إعادة** مع ما حدث فعلاً، وليوم قادم (حتى 7 أيام) **توقّعاً حياً** من Open-Meteo مع أخطر 3 ساعات
 و**حالات سابقة** بظروف مشابهة.
@@ -84,7 +90,7 @@ Sources: **NASA FIRMS** (MODIS C6.1, VIIRS S-NPP / NOAA-20), **Open-Meteo** arch
 ### النتائج (2021-11 → 2025)
 | | AUC | من أيام الحريق ضمن أعلى 10% |
 |---|---|---|
-| النموذج | **0.933** | **74%** (×7.4 الحظ) |
+| النموذج | **0.937** | **75.6%** (×7.6 الحظ) |
 | المناخ وحده | 0.933 | 73% |
 | FFDI وحده | 0.38 | — |
 
